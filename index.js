@@ -1,18 +1,70 @@
 const express = require("express");
 const cors = require("cors");
-require('dotenv').config()
+require("dotenv").config();
 const app = express();
 const port = process.env.PORT || 3000;
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
+const admin = require("firebase-admin");
+const jwt = require("jsonwebtoken");
 
+// index.js
+const decoded = Buffer.from(process.env.FIREBASE_SERVICE_KEY, "base64").toString("utf8");
+const serviceAccount = JSON.parse(decoded);
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
 
 // Middleware
 app.use(cors());
 app.use(express.json());
 
-const uri =
-  `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.9sqbqr2.mongodb.net/?appName=Cluster0`;
+// Firebase built in Token verification with middleware
 
+const verifyFirebaseToken = async (req, res, next) => {
+  if (!req.headers.authorization) {
+    return res.status(401).send({ message: "Unauthorize Access" });
+  }
+  const token = req.headers.authorization.split(" ")[1];
+  if (!token) {
+    return res.status(401).send({ message: "Unauthorize Access" });
+  }
+  try {
+    const userInfo = await admin.auth().verifyIdToken(token);
+    req.token_email = userInfo.email;
+    console.log("after token validation", userInfo);
+    next();
+  } catch (error) {
+    return res.status(401).send({ message: "Unauthorize Access" });
+  }
+};
+
+// custome token generate by JWT
+// const verifyJWTToken = (req, res, next) => {
+//   const authorization = req.headers.authorization;
+//   if (!authorization) {
+//     return res.status(401).send({ message: "unauthorized access" });
+//   }
+//   const token = authorization.split(" ")[1];
+//   if (!token) {
+//     return res.status(401).send({ message: "unauthorized access" });
+//   }
+
+//   jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
+//     if (err) {
+//       return res.status(401).send({ message: "unauthorized access" });
+//     }
+//     // put it in the right place
+//     console.log("after decoded", decoded);
+//     req.token_email = decoded.email;
+//     next();
+//   });
+// };
+
+// URI
+const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.9sqbqr2.mongodb.net/?appName=Cluster0`;
+
+// Connect To MongoDB
 const client = new MongoClient(uri, {
   serverApi: {
     version: ServerApiVersion.v1,
@@ -24,7 +76,7 @@ const client = new MongoClient(uri, {
 async function run() {
   try {
     await client.connect();
-    await client.db("admin").command({ ping: 1 });
+    // await client.db("admin").command({ ping: 1 });
     console.log(
       "Pinged your deployment. You successfully connected to MongoDB!"
     );
@@ -34,6 +86,15 @@ async function run() {
     const productsCollection = database.collection("products");
     const bidsCollection = database.collection("bids");
     const usersCollection = database.collection("users");
+
+    // JWT related Apis
+    app.post("/getToken", (req, res) => {
+      const loggedUser = req.body;
+      const token = jwt.sign(loggedUser, process.env.JWT_SECRET, {
+        expiresIn: "1h",
+      });
+      res.send({ token: token });
+    });
 
     // USER API
     app.post("/users", async (req, res) => {
@@ -52,6 +113,8 @@ async function run() {
 
     // PRODUCTS API
     app.get("/products", async (req, res) => {
+      const headers = req.headers
+      console.log(headers)
       const cursor = productsCollection.find();
       const result = await cursor.toArray();
       res.send(result);
@@ -74,7 +137,7 @@ async function run() {
       res.send(result);
     });
 
-    app.post("/products", async (req, res) => {
+    app.post("/products", verifyFirebaseToken, async (req, res) => {
       const newProduct = req.body;
       const result = await productsCollection.insertOne(newProduct);
       res.send(result);
@@ -102,37 +165,24 @@ async function run() {
       res.send(result);
     });
 
-    // Bid Related API
-    app.get("/bids", async (req, res) => {
+    app.get("/bids", verifyFirebaseToken, async (req, res) => {
       const email = req.query.email;
       const query = {};
       if (email) {
         query.buyer_email = email;
       }
 
-      const cursor = bidsCollection.find(query);
-      const result = await cursor.toArray();
-      res.send(result);
-    });
-
-    app.get("/products/bids/:productId", async (req, res) => {
-      const productId = req.params.productId;
-      const query = { product: productId };
-      const cursor = bidsCollection.find(query);
-      const result = await cursor.toArray();
-      res.send(result);
-    });
-
-    app.get("/bids", async (req, res) => {
-      const email = req.query.email
-      const query = {};
-      if (query.email) {
-        query.buyer_email = email
+      // verify user have access to see this data
+      if (email !== req.token_email) {
+        return res.status(403).send({ message: "forbidden access" });
       }
-      const cursor = bidsCollection.find(query.email);
+
+      const cursor = bidsCollection.find(query);
       const result = await cursor.toArray();
       res.send(result);
     });
+
+    // Bid Related API
 
     app.post("/bids", async (req, res) => {
       const newBid = req.body;
@@ -140,14 +190,24 @@ async function run() {
       res.send(result);
     });
 
-    app.delete("/bids/:id", async(req, res)=>{
-      const id = req.params.id
-      const query = { _id: new ObjectId(id) }
-      const result = await bidsCollection.deleteOne(query)
+    app.get(
+      "/products/bids/:productId",
+      verifyFirebaseToken,
+      async (req, res) => {
+        const productId = req.params.productId;
+        const query = { product: productId };
+        const cursor = bidsCollection.find(query);
+        const result = await cursor.toArray();
+        res.send(result);
+      }
+    );
+
+    app.delete("/bids/:id", async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await bidsCollection.deleteOne(query);
       res.send(result);
-    })
-
-
+    });
   } finally {
   }
 }
